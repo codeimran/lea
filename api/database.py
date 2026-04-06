@@ -13,13 +13,23 @@ DEFAULT_LOCAL_DB = "mysql+pymysql://root:password@localhost:3306/la?charset=utf8
 DATABASE_URL = os.getenv("DATABASE_URL", DEFAULT_LOCAL_DB)
 # ============================================================
 
-engine = create_engine(
-    DATABASE_URL,
-    pool_pre_ping=True,     # auto-reconnect if connection drops
-    pool_recycle=3600,      # recycle connections every 1 hr
-    echo=False,
-    connect_args={"ssl": {}} if "aivencloud" in DATABASE_URL else {}
-)
+# Validate the DATABASE_URL format safely
+if not DATABASE_URL.startswith("mysql+pymysql://") and not DATABASE_URL.startswith("sqlite"):
+    print(f"Warning: Invalid DATABASE_URL provided. Falling back to in-memory SQLite for safe boot.")
+    DATABASE_URL = "sqlite:///:memory:"
+
+try:
+    engine = create_engine(
+        DATABASE_URL,
+        pool_pre_ping=True,
+        pool_recycle=3600,
+        echo=False,
+        connect_args={"ssl": {}} if "aivencloud" in DATABASE_URL else {}
+    )
+except Exception as e:
+    print(f"CRITICAL: SQLAlchemy failed to parse or connect using {DATABASE_URL}: {e}")
+    engine = create_engine("sqlite:///:memory:")
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
