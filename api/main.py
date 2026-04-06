@@ -74,27 +74,53 @@ async def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_d
     duplicates = 0
     errors = 0
 
+    valid_leads = []
+    phones_to_check = set()
+    
+    # 1. Pre-process to normalize phones and filter out missing ones
     for lead_dict in leads_data:
         try:
             phone_raw = lead_dict.get("phone") or ""
-            
-            # Skip if phone is empty (Manager's requirement)
             if not phone_raw:
                 errors += 1
                 continue
                 
             phone_normalized = normalize_phone(phone_raw)
-
-            # Duplicate check: if phone is present, check if it already exists
-            is_duplicate = False
             if phone_normalized:
-                existing = db.query(Lead).filter(Lead.phone == phone_normalized).first()
-                if existing:
-                    is_duplicate = True
-                    duplicates += 1
+                phones_to_check.add(phone_normalized)
+                
+            valid_leads.append((lead_dict, phone_raw, phone_normalized))
+        except Exception as e:
+            errors += 1
+            continue
+
+    # 2. Batch check existing phones in DB
+    existing_phones = set()
+    try:
+        if phones_to_check:
+            # Query in chunks to avoid massive IN clauses
+            phones_list = list(phones_to_check)
+            CHUNK_SIZE = 500
+            for i in range(0, len(phones_list), CHUNK_SIZE):
+                chunk = phones_list[i:i + CHUNK_SIZE]
+                found = db.query(Lead.phone).filter(Lead.phone.in_(chunk)).all()
+                for (p,) in found:
+                    existing_phones.add(p)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error during duplicate check: {str(e)}")
+
+    # 3. Create objects and add to session
+    now = datetime.utcnow()
+    
+    for lead_dict, phone_raw, phone_normalized in valid_leads:
+        try:
+            is_duplicate = False
+            if phone_normalized and phone_normalized in existing_phones:
+                is_duplicate = True
+                duplicates += 1
+                continue
 
             if not is_duplicate:
-                now = datetime.utcnow()
                 new_lead = Lead(
                     lead_source=lead_dict.get("lead_source"),
                     employee_name=lead_dict.get("employee_name"),
@@ -105,27 +131,40 @@ async def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_d
                     status=lead_dict.get("status"),
                     remarks=lead_dict.get("remarks"),
                     source_file=file.filename,
-                    lead_date=now,          # date this lead was uploaded/recorded
+                    lead_date=now,
                     uploaded_at=now,
                 )
                 db.add(new_lead)
+                
+                # Ensure we handle duplicates WITHIN the file
+                if phone_normalized:
+                    existing_phones.add(phone_normalized)
+                    
                 inserted += 1
         except Exception as e:
             errors += 1
             continue
 
-    db.commit()
+    try:
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Database commit failed: {str(e)}")
 
     # Save upload log
-    log = UploadLog(
-        filename=file.filename,
-        total_rows=len(leads_data),
-        inserted=inserted,
-        duplicates=duplicates,
-        errors=errors,
-    )
-    db.add(log)
-    db.commit()
+    try:
+        log = UploadLog(
+            filename=file.filename,
+            total_rows=len(leads_data),
+            inserted=inserted,
+            duplicates=duplicates,
+            errors=errors,
+        )
+        db.add(log)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        print(f"Warning: Failed to save upload log: {e}")
 
     return {
         "success": True,
