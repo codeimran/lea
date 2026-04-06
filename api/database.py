@@ -9,9 +9,7 @@ from datetime import datetime
 # ============================================================
 # Default local MySQL string
 DEFAULT_LOCAL_DB = "mysql+pymysql://root:password@localhost:3306/la?charset=utf8mb4"
-
-DATABASE_URL = os.getenv("DATABASE_URL", DEFAULT_LOCAL_DB)
-# ============================================================
+DATABASE_URL = os.getenv("DATABASE_URL", DEFAULT_LOCAL_DB).strip()# ============================================================
 
 # Validate the DATABASE_URL format safely
 if not DATABASE_URL.startswith("mysql+pymysql://") and not DATABASE_URL.startswith("sqlite"):
