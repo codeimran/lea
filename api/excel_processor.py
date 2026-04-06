@@ -1,5 +1,5 @@
-import pandas as pd
 import re
+import openpyxl
 from typing import List, Dict, Any
 
 
@@ -16,85 +16,51 @@ VALID_SOURCES = {
 }
 
 
-def is_summary_row(row: pd.Series) -> bool:
-    """Detect if a row is a summary/total row (not actual lead data)."""
-    lead_source = str(row.get("lead_source", "") or "").strip().lower()
-    # Summary rows typically have "total calls" or no phone
-    if "total" in lead_source or "calls" in lead_source:
-        return True
-    # Empty customer name and phone - likely blank filler row
-    customer = str(row.get("customer_name", "") or "").strip()
-    phone = str(row.get("phone", "") or "").strip()
-    if not customer and not phone:
-        return True
-    return False
-
-
 def read_excel_file(file_source) -> List[Dict[str, Any]]:
-    """
-    Read an Excel file and return a list of lead dicts.
-    Accepts either:
-      - A file path (str)
-      - A BytesIO object (in-memory, no temp file needed on Windows)
-    """
     import io
 
-    # If BytesIO, rewind it to start before giving to pandas
     if isinstance(file_source, io.BytesIO):
         file_source.seek(0)
 
-    # Try to open and detect sheets
     try:
-        xl = pd.ExcelFile(file_source)
-        sheet_name = xl.sheet_names[0]  # Use first sheet
+        wb = openpyxl.load_workbook(file_source, data_only=True)
+        sheet = wb.active
     except Exception as e:
-        raise ValueError(f"Cannot read Excel file: {e}. Ensure it is .xlsx or .xls format.")
-
-    # If BytesIO, rewind again before second read
-    if isinstance(file_source, io.BytesIO):
-        file_source.seek(0)
-
-    # Read with no header to detect header row ourselves
-    df = pd.read_excel(file_source, sheet_name=sheet_name, header=None)
+        raise ValueError(f"Cannot read Excel file: {e}. Ensure it is .xlsx format.")
 
     # Find the header row by looking for "Phone" or "Customer" keyword
     header_row_idx = None
-    for idx, row in df.iterrows():
-        row_lower = [str(v).strip().lower() for v in row.values]
-        if any("phone" in cell or "customer" in cell or "employee" in cell for cell in row_lower):
-            header_row_idx = idx
+    headers = []
+    
+    for row_idx, row in enumerate(sheet.iter_rows(values_only=True), 1):
+        row_str = [str(v).strip().lower() for v in row if v is not None]
+        if any("phone" in cell or "customer" in cell or "employee" in cell for cell in row_str):
+            header_row_idx = row_idx
+            headers = [str(v).strip().lower().replace(" ", "_").replace("-", "_") if v else "" for v in row]
             break
 
     if header_row_idx is None:
-        header_row_idx = 0
-
-    # If BytesIO, rewind again before final read
-    if isinstance(file_source, io.BytesIO):
-        file_source.seek(0)
-
-    # Re-read with correct header row
-    df = pd.read_excel(file_source, sheet_name=sheet_name, header=header_row_idx)
-
-    # Normalize column names
-    df.columns = [normalize_col_name(c) for c in df.columns]
+        header_row_idx = 1
+        # Fallback empty headers
+        headers = []
 
     # Map to standard field names
     col_map = {
-        "lead_source": find_col(df, ["lead source", "lead_source", "source"]),
-        "employee_name": find_col(df, ["employee name", "employee_name", "employee"]),
-        "customer_name": find_col(df, ["customer name", "customer_name", "customer"]),
-        "address": find_col(df, ["address", "addr"]),
-        "phone": find_col(df, ["phone", "mobile", "contact", "phone no", "phone number"]),
-        "status": find_col(df, ["status"]),
-        "remarks": find_col(df, ["remarks", "remark", "notes", "note"]),
+        "lead_source": find_col(headers, ["lead source", "lead_source", "source"]),
+        "employee_name": find_col(headers, ["employee name", "employee_name", "employee"]),
+        "customer_name": find_col(headers, ["customer name", "customer_name", "customer"]),
+        "address": find_col(headers, ["address", "addr"]),
+        "phone": find_col(headers, ["phone", "mobile", "contact", "phone no", "phone number"]),
+        "status": find_col(headers, ["status"]),
+        "remarks": find_col(headers, ["remarks", "remark", "notes", "note"]),
     }
 
     leads = []
-    for _, row in df.iterrows():
+    for row in sheet.iter_rows(min_row=header_row_idx + 1, values_only=True):
         lead = {}
-        for field, col in col_map.items():
-            if col is not None:
-                val = row.get(col, None)
+        for field, col_idx in col_map.items():
+            if col_idx is not None and col_idx < len(row):
+                val = row[col_idx]
                 lead[field] = clean_value(val)
             else:
                 lead[field] = None
@@ -104,7 +70,6 @@ def read_excel_file(file_source) -> List[Dict[str, Any]]:
             leads.append(lead)
 
     return leads
-
 
 
 def is_lead_row_valid(lead: Dict) -> bool:
@@ -123,25 +88,22 @@ def is_lead_row_valid(lead: Dict) -> bool:
     return True
 
 
-def normalize_col_name(col) -> str:
-    return str(col).strip().lower().replace(" ", "_").replace("-", "_")
-
-
-def find_col(df: pd.DataFrame, candidates: list):
-    """Find a matching column name from a list of candidates."""
+def find_col(headers: list, candidates: list):
+    """Find a matching column index from a list of candidates."""
     for c in candidates:
+        candidate_norm = c.replace(" ", "_")
         # Exact match
-        if c.replace(" ", "_") in df.columns:
-            return c.replace(" ", "_")
+        if candidate_norm in headers:
+            return headers.index(candidate_norm)
         # Partial match
-        for col in df.columns:
-            if c.replace(" ", "_") in col or col in c.replace(" ", "_"):
-                return col
+        for idx, h in enumerate(headers):
+            if candidate_norm in h or h in candidate_norm:
+                return idx
     return None
 
 
 def clean_value(val) -> str:
-    if val is None or (isinstance(val, float) and str(val) == "nan"):
+    if val is None:
         return None
     val = str(val).strip()
     if val.lower() in ("nan", "none", "null", ""):
