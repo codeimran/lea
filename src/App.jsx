@@ -3,20 +3,26 @@ import LoginPage from './pages/LoginPage'
 import Dashboard from './pages/Dashboard'
 import PublicUpload from './pages/PublicUpload'
 
+// Read deployment mode from environment variable set in Vercel
+// 'upload'    → Upload portal only (no dashboard access)
+// 'dashboard' → Dashboard only (no upload route)
+const APP_MODE = import.meta.env.VITE_APP_MODE || 'dashboard'
+
 function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false)
   const [user, setUser] = useState(null)
   const [initializing, setInitializing] = useState(true)
-  const [currentPath, setCurrentPath] = useState(window.location.pathname)
 
-  // Listen for navigation changes
-  useEffect(() => {
-    const handlePopState = () => setCurrentPath(window.location.pathname)
-    window.addEventListener('popstate', handlePopState)
-    return () => window.removeEventListener('popstate', handlePopState)
-  }, [])
+  // ── UPLOAD-ONLY DEPLOYMENT ──────────────────────────────────
+  // If this Vercel project is the upload portal, render ONLY
+  // the public upload page. Nothing else is reachable.
+  if (APP_MODE === 'upload') {
+    return <PublicUpload />
+  }
 
+  // ── DASHBOARD DEPLOYMENT ────────────────────────────────────
   // Check login state on mount
+  // eslint-disable-next-line react-hooks/rules-of-hooks
   useEffect(() => {
     const savedUser = localStorage.getItem('ceo_user')
     if (savedUser) {
@@ -39,12 +45,11 @@ function App() {
   }
 
   if (initializing) {
-    return <div className="min-h-screen bg-slate-50 flex items-center justify-center font-bold text-slate-400">Loading Dashboard...</div>
-  }
-
-  // Standalone Public Upload Route
-  if (currentPath === '/upload') {
-    return <PublicUpload />
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center font-bold text-slate-400">
+        Loading Dashboard...
+      </div>
+    )
   }
 
   return (

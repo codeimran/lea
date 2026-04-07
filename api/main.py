@@ -1,7 +1,8 @@
-from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, Query
+from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, Query, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from contextlib import asynccontextmanager
 from sqlalchemy.orm import Session
 from sqlalchemy import func, text
 from datetime import date as date_type
@@ -15,26 +16,55 @@ sys.path.insert(0, os.path.dirname(__file__))
 import io
 from datetime import datetime
 from typing import List, Optional
+from pydantic import BaseModel
 
 from database import create_tables, get_db, Lead, UploadLog
 from excel_processor import read_excel_file
 from phone_utils import normalize_phone
 
-app = FastAPI(title="Lead Management POC", version="1.0.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Create DB tables on startup if they don't exist."""
+    try:
+        create_tables()
+        print("✅ Database tables created/verified successfully.")
+    except Exception as e:
+        print(f"⚠️  Warning: Could not auto-create tables: {e}")
+    yield
 
-# CORS - allow all origins for POC
+app = FastAPI(title="Lead Management POC", version="1.0.0", lifespan=lifespan)
+
+# CORS — restrict to your two Vercel deployment domains
+# Add any custom domains here if you assign them later.
+ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv(
+        "ALLOWED_ORIGINS",
+        "http://localhost:5173,http://localhost:3000",
+    ).split(",")
+    if origin.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# We do NOT create tables on startup in serverless environments
-# because it requires a synchronous database connection which can timeout Vercel's 10s boot limit.
-# Tables should be created manually via a script or migration.
-print("Initialization: skipping create_tables() to avoid Vercel boot timeouts.")
+# ── Upload secret token ──────────────────────────────────────────
+# Set UPLOAD_SECRET env var in Vercel. The upload portal frontend
+# sends it as the X-Upload-Token header. Requests without it are
+# rejected with 403 Forbidden.
+UPLOAD_SECRET = os.getenv("UPLOAD_SECRET", "")
+
+def verify_upload_token(x_upload_token: str = Header(None)):
+    """Dependency: rejects upload requests missing the secret token."""
+    if UPLOAD_SECRET and x_upload_token != UPLOAD_SECRET:
+        raise HTTPException(status_code=403, detail="Forbidden: invalid upload token.")
+
+
 
 # Serve frontend static files
 FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend")
@@ -50,7 +80,7 @@ def serve_frontend():
     return {"message": "Lead Management API is running. Frontend not found."}
 
 
-@app.post("/api/upload")
+@app.post("/api/upload", dependencies=[Depends(verify_upload_token)])
 async def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_db)):
     """
     Upload an Excel file, process it, and merge into the database.
@@ -251,6 +281,26 @@ def get_leads(
             for l in leads
         ],
     }
+
+
+class StatusUpdate(BaseModel):
+    status: str
+
+@app.patch("/api/leads/{lead_id}/status")
+def update_lead_status(lead_id: int, status_data: StatusUpdate, db: Session = Depends(get_db)):
+    """Update the status of a specific lead."""
+    lead = db.query(Lead).filter(Lead.id == lead_id).first()
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    
+    lead.status = status_data.status
+    try:
+        db.commit()
+        return {"success": True, "message": "Status updated successfully", "status": lead.status}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Database commit failed: {str(e)}")
+
 
 
 @app.get("/api/dashboard")

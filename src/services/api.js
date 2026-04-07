@@ -33,8 +33,8 @@ export const getLeads = async (params = {}) => {
         if (params.date_from) queryParams.append('date_from', params.date_from);
         if (params.date_to) queryParams.append('date_to', params.date_to);
         
-        // Default limit to 200 as per backend main.py
-        queryParams.append('limit', 200);
+        queryParams.append('skip', params.skip || 0);
+        queryParams.append('limit', params.limit || 50);
 
         const response = await fetch(`${BASE_URL}/leads?${queryParams.toString()}`);
         if (!response.ok) throw new Error('Failed to fetch leads');
@@ -53,9 +53,16 @@ export const uploadLeads = async (file) => {
         const formData = new FormData();
         formData.append('file', file);
 
+        // X-Upload-Token is required by the backend security guard.
+        // Set VITE_UPLOAD_SECRET in the upload portal's Vercel env vars.
+        const uploadToken = import.meta.env.VITE_UPLOAD_SECRET || '';
+
         const response = await fetch(`${BASE_URL}/upload`, {
             method: 'POST',
             body: formData,
+            headers: {
+                'X-Upload-Token': uploadToken,
+            },
         });
 
         const data = await response.json();
@@ -77,3 +84,26 @@ export const exportLeads = async () => {
         console.error('Error exporting leads:', error);
     }
 };
+
+/**
+ * Update the status of a specific lead.
+ */
+export const updateLeadStatus = async (leadId, status) => {
+    try {
+        const response = await fetch(`${BASE_URL}/leads/${leadId}/status`, {
+            method: 'PATCH',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ status }),
+        });
+
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || 'Failed to update status');
+        return data;
+    } catch (error) {
+        console.error('Error updating lead status:', error);
+        throw error;
+    }
+};
+
